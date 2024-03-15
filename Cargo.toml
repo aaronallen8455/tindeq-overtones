@@ -1,0 +1,13 @@
+[package]
+name = "rust-tindeq"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+bluest = "0.6.6"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "time"]}
+futures-lite = { version = "1.13.0", default-features = false }
+uuid = "1.1.1"
+cpal = "0.15.3"
