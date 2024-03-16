@@ -45,20 +45,25 @@ fn mk_stream(cur_weight: Arc<Mutex<f32>>) -> Result<cpal::Stream, cpal::BuildStr
     let config = device.default_output_config().unwrap();
 
     match config.sample_format() {
-        cpal::SampleFormat::F32 => create_stream(&device, &config.into()),
+        cpal::SampleFormat::F32 => create_stream(cur_weight, &device, &config.into()),
         sample_format => panic!("Unsupported sample format {sample_format}")
     }
 }
 
-fn create_stream(device: &cpal::Device, config: &cpal::StreamConfig)
+fn weight_to_freq(weight: f32) -> f32 {
+    220.0 * (weight.trunc() + 1.0)
+}
+
+fn create_stream(cur_weight: Arc<Mutex<f32>>, device: &cpal::Device, config: &cpal::StreamConfig)
     -> Result<cpal::Stream, cpal::BuildStreamError>
 {
     let sample_rate = config.sample_rate.0 as f32;
     let channels = config.channels as usize;
     let mut sample_clock = 0f32;
     let mut next_value = move || {
-        sample_clock = (sample_clock + 1.0) % sample_rate; // why?
-        (sample_clock * 440.0 * 2.0 * std::f32::consts::PI / sample_rate).sin()
+        sample_clock = (sample_clock + 1.0) % sample_rate;
+        let freq = weight_to_freq(*cur_weight.lock().unwrap());
+        (sample_clock * freq * 2.0 * std::f32::consts::PI / sample_rate).sin()
     };
 
     println!("{sample_rate}");
