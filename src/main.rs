@@ -2,9 +2,19 @@ use std::error::Error;
 use std::sync::{Arc, Mutex};
 use std::io;
 
+use futures_lite::stream::StreamExt;
 use uuid::{uuid, Uuid};
-use bluest::{Adapter};
-use futures_lite::StreamExt;
+use btleplug::{
+    platform::Manager,
+    api::{
+        Manager as _,
+        Central,
+        ScanFilter,
+        CentralEvent,
+        Peripheral,
+        WriteType,
+    }
+};
 use cpal::{
     traits::{DeviceTrait, HostTrait, StreamTrait}
 };
@@ -34,7 +44,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     });
 
     stream.play()?;
-    interact_progressor(running, cur_weight).await?;
+    progressor_interaction(running, cur_weight).await?;
 
     Ok(())
 }
@@ -50,8 +60,9 @@ fn mk_stream(cur_weight: Arc<Mutex<f32>>) -> Result<cpal::Stream, cpal::BuildStr
     }
 }
 
+// Maps a weight value to a frequency in the overtone series of A110
 fn weight_to_freq(weight: f32) -> f32 {
-    220.0 * (weight.trunc() + 1.0)
+    110.0 * (weight.trunc() + 1.0)
 }
 
 fn create_stream(cur_weight: Arc<Mutex<f32>>, device: &cpal::Device, config: &cpal::StreamConfig)
@@ -66,7 +77,6 @@ fn create_stream(cur_weight: Arc<Mutex<f32>>, device: &cpal::Device, config: &cp
         (sample_clock * freq * 2.0 * std::f32::consts::PI / sample_rate).sin()
     };
 
-    println!("{sample_rate}");
     device.build_output_stream(
         config,
         move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
@@ -106,64 +116,70 @@ fn parse_response(i: Vec<u8>) -> Option<Response> {
     }
 }
 
-fn wave_sample(a: f32, t: f32, f: f32, p: f32) -> f32 {
-    a * f32::sin(2.0 * std::f32::consts::PI * f * t + p)
-}
-
-async fn interact_progressor(running: Arc<Mutex<bool>>, cur_weight: Arc<Mutex<f32>>)
+async fn progressor_interaction(running: Arc<Mutex<bool>>, cur_weight: Arc<Mutex<f32>>)
     -> Result<(), Box<dyn Error>> {
-    let adapter = Adapter::default().await.ok_or("Bluetooth adapter not found")?;
-    adapter.wait_available().await?;
+    let manager = Manager::new().await?;
+    // Get the first bluetooth adapter
+    let adapters = manager.adapters().await.expect("unable to fetch adapters");
+    let central = adapters.get(0).expect("no adapters");
 
-    let discovered_device = {
-        println!("starting scan");
-        let mut scan = adapter.scan(&[SERVICE_UUID]).await?;
-        println!("scan started");
-        scan.next().await.ok_or("scan_terminated")?
-    };
+    central.start_scan(ScanFilter { services : vec![SERVICE_UUID] }).await?;
 
-    println!("{:?} {:?}", discovered_device.rssi, discovered_device.adv_data);
-    let device = discovered_device.device;
+    let events = central.events().await?;
+    let device_id = events.filter_map
+        (|x| match x {
+            CentralEvent::DeviceDiscovered(id) => Some(id),
+            _ => None,
+        }
+        ).next().await.ok_or("device not found")?;
 
-    adapter.connect_device(&device).await?;
+    let device = central.peripheral(&device_id).await?;
+
+    device.connect().await?;
     println!("connected");
 
-    let service = match device
-        .discover_services_with_uuid(SERVICE_UUID)
-        .await?
-        .first()
-        {
-            Some(service) => service.clone(),
-            None => return Err("service not found".into()),
-        };
+    device.discover_services().await?;
 
-    let characteristics = service.characteristics().await?;
-    let control_characteristic = characteristics
+    let services = device.services();
+    let service = services.iter().find(
+        |s| s.uuid == SERVICE_UUID
+        ).ok_or("service not found")?;
+
+    let control_characteristic = service.characteristics
         .iter()
-        .find(|x| x.uuid() == CONTROL_UUID)
+        .find(|x| x.uuid == CONTROL_UUID)
         .ok_or("control characteristic not found")?;
-    let data_characteristic = characteristics
+    let data_characteristic = service.characteristics
         .iter()
-        .find(|x| x.uuid() == DATA_UUID)
+        .find(|x| x.uuid == DATA_UUID)
         .ok_or("data characteristic not found")?;
 
-    control_characteristic.write(&[START_WEIGHT_MEASUREMENT, 0]).await?;
+    device.subscribe(data_characteristic).await?;
+    device.write(
+        control_characteristic,
+        &[START_WEIGHT_MEASUREMENT, 0],
+        WriteType::WithResponse
+    ).await?;
 
-    let mut notifications = data_characteristic.notify().await?;
+    let mut notifications = device.notifications().await?;
 
-    while let Some(Ok(x)) = notifications.next().await
+    while let Some(x) = notifications.next().await
     {
         if !(*running.lock().unwrap()) { break }
-        match parse_response(x) {
+        match parse_response(x.value) {
             Some(Response::WeightMeasurement(w, _)) =>
                 *cur_weight.lock().unwrap() = w,
             _ => (),
         }
     }
 
-    control_characteristic.write(&[END_WEIGHT_MEASUREMENT, 0]).await?;
+    device.write(
+        control_characteristic,
+        &[END_WEIGHT_MEASUREMENT, 0],
+        WriteType::WithResponse
+    ).await?;
 
-    adapter.disconnect_device(&device).await?;
+    device.disconnect().await?;
     println!("disconnected");
 
     Ok(())
