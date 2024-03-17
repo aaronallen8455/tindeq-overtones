@@ -26,10 +26,20 @@ fn create_stream(cur_weight: Arc<Mutex<f32>>, device: &cpal::Device, config: &cp
     let sample_rate = config.sample_rate.0 as f32;
     let channels = config.channels as usize;
     let mut sample_clock = 0f32;
+    let mut phase = 0.0;
+    let mut phase_offset = 0.0;
+    let mut prev_freq = 0.0;
     let mut next_value = move || {
         sample_clock = (sample_clock + 1.0) % sample_rate;
         let freq = weight_to_freq(*cur_weight.lock().unwrap());
-        (sample_clock * freq * 2.0 * std::f32::consts::PI / sample_rate).sin()
+        if freq != prev_freq {
+            prev_freq = freq;
+            sample_clock = 1.0;
+            phase_offset = phase % (2.0 * std::f32::consts::PI);
+        }
+        phase = sample_clock * freq * 2.0 * std::f32::consts::PI / sample_rate
+            + phase_offset;
+        phase.sin()
     };
 
     device.build_output_stream(

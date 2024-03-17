@@ -92,7 +92,6 @@ pub async fn interaction(running: Arc<Mutex<bool>>, cur_weight: Arc<Mutex<f32>>)
     ).await?;
 
     let mut notifications = device.notifications().await?;
-
     while let Some(x) = notifications.next().await
     {
         if !(*running.lock().unwrap()) { break }
